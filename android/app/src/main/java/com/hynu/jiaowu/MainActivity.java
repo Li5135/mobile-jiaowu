@@ -94,7 +94,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
-    protected void onDestroy() {
+    public void onDestroy() {
         saveCookiesSnapshot();
         handler.removeCallbacks(cookieSaver);
         handler.removeCallbacks(urlWatcher);
