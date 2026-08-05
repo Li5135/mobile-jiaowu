@@ -1,5 +1,6 @@
 package com.hynu.jiaowu;
 
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
@@ -27,6 +28,8 @@ public class MainActivity extends BridgeActivity {
     private static final String PREFS_NAME = "jiaowu_creds";
     private static final String KEY_ACCT = "acct";
     private static final String KEY_PWD = "pwd";
+    private static final String KEY_BG = "bg";
+    private static final int REQ_PICK_BG = 1001;
 
     /** 学习脚本：按真实登录框结构（placeholder 特征）抓取账号密码 */
     private static final String LEARN_JS =
@@ -70,6 +73,11 @@ public class MainActivity extends BridgeActivity {
             "var menu=document.createElement('div');" +
             "menu.id='app-settings-menu';" +
             "menu.style.cssText='position:fixed;top:54px;right:12px;z-index:99999;background:#fff;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.2);padding:6px 0;min-width:130px;';" +
+            "var it2=document.createElement('div');" +
+            "it2.textContent='\u66f4\u6362\u8bfe\u8868\u4e3b\u9898';" +
+            "it2.style.cssText='padding:12px 16px;font-size:14px;color:#333;cursor:pointer;text-align:center;';" +
+            "it2.onclick=function(){if(window.AndroidBridge){window.AndroidBridge.chooseBackground();}};" +
+            "menu.appendChild(it2);" +
             "var it=document.createElement('div');" +
             "it.textContent='\u9000\u51fa\u8d26\u53f7';" +
             "it.style.cssText='padding:12px 16px;font-size:14px;color:#d33;cursor:pointer;text-align:center;';" +
@@ -78,6 +86,20 @@ public class MainActivity extends BridgeActivity {
             "document.body.appendChild(menu);" +
             "};" +
             "document.body.appendChild(btn);" +
+            "})()";
+
+    /** 背景注入脚本：课表页面应用自定义背景图片（__BG__ 占位，data URI） */
+    private static final String BG_JS =
+            "(function(){" +
+            "var h=location.hash||'';" +
+            "var isTable=h.indexOf('schedule')>=0||h.indexOf('kebiao')>=0||h.indexOf('timetable')>=0||h.indexOf('course')>=0;" +
+            "var s=document.getElementById('app-bg-style');" +
+            "if(!isTable){if(s){s.parentNode.removeChild(s);}return;}" +
+            "if(s)return;" +
+            "s=document.createElement('style');" +
+            "s.id='app-bg-style';" +
+            "s.textContent='html,body{background-image:url(__BG__)!important;background-size:cover!important;background-position:center!important;background-attachment:fixed!important;}';" +
+            "document.head.appendChild(s);" +
             "})()";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -100,6 +122,11 @@ public class MainActivity extends BridgeActivity {
                 }
                 // 0.5) 在“我的”页面注入设置按钮/退出账号
                 wv.evaluateJavascript(SETTINGS_JS, null);
+                // 0.6) 课表页应用自定义背景
+                String bg = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_BG, "");
+                if (!bg.isEmpty()) {
+                    wv.evaluateJavascript(BG_JS.replace("__BG__", bg), null);
+                }
                 // 1) 记录 URL 到站内导航栈
                 wv.evaluateJavascript("(function(){ return window.location.href; })()", value -> {
                     String url = unquoteJsString(value);
@@ -229,12 +256,70 @@ public class MainActivity extends BridgeActivity {
         return value;
     }
 
-    /** 原生桥：网页内“退出账号”菜单项点击后调用 */
+    /** 原生桥：网页内“退出账号”/“更换课表主题”菜单项点击后调用 */
     private class JsBridge {
         @android.webkit.JavascriptInterface
         public void logout() {
             runOnUiThread(MainActivity.this::clearSessionAndReload);
         }
+
+        @android.webkit.JavascriptInterface
+        public void chooseBackground() {
+            runOnUiThread(() -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                    i.setType("image/*");
+                    startActivityForResult(i, REQ_PICK_BG);
+                } catch (Exception ignored) {
+                }
+            });
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PICK_BG && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            final android.net.Uri uri = data.getData();
+            new Thread(() -> {
+                try {
+                    final String b64 = loadImageAsBase64(uri);
+                    runOnUiThread(() -> {
+                        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                                .edit().putString(KEY_BG, b64).apply();
+                        Toast.makeText(this, "课表主题已设置，进入课表页查看", Toast.LENGTH_LONG).show();
+                    });
+                } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(this, "图片处理失败，请换一张", Toast.LENGTH_SHORT).show());
+                }
+            }).start();
+        }
+    }
+
+    /** 读图 → 缩放 → JPEG 压缩 → base64 data URI（避免超大字符串） */
+    private String loadImageAsBase64(android.net.Uri uri) {
+        android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
+        opts.inJustDecodeBounds = true;
+        java.io.InputStream is0 = getContentResolver().openInputStream(uri);
+        android.graphics.BitmapFactory.decodeStream(is0, null, opts);
+        if (is0 != null) { try { is0.close(); } catch (Exception ignored) {} }
+        int sample = 1;
+        while (opts.outWidth / (sample * 2) >= 720) sample *= 2;
+        opts.inJustDecodeBounds = false;
+        opts.inSampleSize = sample;
+        java.io.InputStream is = getContentResolver().openInputStream(uri);
+        android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeStream(is, null, opts);
+        if (is != null) { try { is.close(); } catch (Exception ignored) {} }
+        if (bmp == null) throw new RuntimeException("decode fail");
+        int w = bmp.getWidth();
+        if (w > 720) {
+            int h = (int) (bmp.getHeight() * 720.0 / w);
+            bmp = android.graphics.Bitmap.createScaledBitmap(bmp, 720, h, true);
+        }
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, bos);
+        return "data:image/jpeg;base64," + android.util.Base64.encodeToString(
+                bos.toByteArray(), android.util.Base64.NO_WRAP);
     }
 
     /** 彻底清除登录态（cookie + localStorage/sessionStorage + WebStorage），回到登录页 */
