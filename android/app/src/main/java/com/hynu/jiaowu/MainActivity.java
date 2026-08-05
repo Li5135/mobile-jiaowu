@@ -79,7 +79,9 @@ public class MainActivity extends BridgeActivity {
                 wv.evaluateJavascript(LEARN_JS, value -> {
                     if (value == null || value.equals("null")) return;
                     try {
-                        JSONObject o = new JSONObject(value);
+                        // evaluateJavascript 返回值是 JSON 编码字符串，先解一层外层引号
+                        String inner = new JSONObject("{\"v\":" + value + "}").getString("v");
+                        JSONObject o = new JSONObject(inner);
                         String acct = o.optString("acct", "");
                         String pwd = o.optString("pwd", "");
                         if (!acct.isEmpty() && !pwd.isEmpty()) {
