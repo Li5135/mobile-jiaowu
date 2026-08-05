@@ -51,11 +51,41 @@ public class MainActivity extends BridgeActivity {
             "set.call(pwd,__PWD__);pwd.dispatchEvent(new Event('input',{bubbles:true}));" +
             "})()";
 
+    /** 注入脚本：在“我的”页面(#/new/person)右上角加设置按钮，点开有“退出账号” */
+    private static final String SETTINGS_JS =
+            "(function(){" +
+            "var h=location.hash||'';" +
+            "var isMine=h.indexOf('person')>=0||h.indexOf('my')>=0||h.indexOf('mine')>=0||h.indexOf('user')>=0;" +
+            "var btn=document.getElementById('app-settings-btn');" +
+            "var menu=document.getElementById('app-settings-menu');" +
+            "if(!isMine){if(btn){btn.parentNode.removeChild(btn);}if(menu){menu.parentNode.removeChild(menu);}return;}" +
+            "if(btn)return;" +
+            "btn=document.createElement('div');" +
+            "btn.id='app-settings-btn';" +
+            "btn.textContent='\u2699';" +
+            "btn.style.cssText='position:fixed;top:12px;right:12px;z-index:99999;width:36px;height:36px;line-height:36px;text-align:center;background:rgba(0,0,0,0.35);color:#fff;font-size:20px;border-radius:50%;';" +
+            "btn.onclick=function(){" +
+            "var m=document.getElementById('app-settings-menu');" +
+            "if(m){m.style.display=(m.style.display==='none')?'block':'none';return;}" +
+            "var menu=document.createElement('div');" +
+            "menu.id='app-settings-menu';" +
+            "menu.style.cssText='position:fixed;top:54px;right:12px;z-index:99999;background:#fff;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.2);padding:6px 0;min-width:130px;';" +
+            "var it=document.createElement('div');" +
+            "it.textContent='\u9000\u51fa\u8d26\u53f7';" +
+            "it.style.cssText='padding:12px 16px;font-size:14px;color:#d33;cursor:pointer;text-align:center;';" +
+            "it.onclick=function(){if(window.AndroidBridge){window.AndroidBridge.logout();}};" +
+            "menu.appendChild(it);" +
+            "document.body.appendChild(menu);" +
+            "};" +
+            "document.body.appendChild(btn);" +
+            "})()";
+
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     /** 站内导航栈（SPA hash 路由不会产生 WebView 历史，需要自己维护） */
     private final List<String> historyStack = new ArrayList<>();
     private long lastBackPressedAt = 0L;
+    private boolean jsBridgeAttached = false;
 
     /** 轮询：记录导航栈 + 学习/填充账号密码 */
     private final Runnable urlWatcher = new Runnable() {
@@ -63,6 +93,13 @@ public class MainActivity extends BridgeActivity {
         public void run() {
             WebView wv = getBridge() != null ? getBridge().getWebView() : null;
             if (wv != null) {
+                // 0) 首次附加原生桥（供网页内“退出账号”调用）
+                if (!jsBridgeAttached) {
+                    wv.addJavascriptInterface(new JsBridge(), "AndroidBridge");
+                    jsBridgeAttached = true;
+                }
+                // 0.5) 在“我的”页面注入设置按钮/退出账号
+                wv.evaluateJavascript(SETTINGS_JS, null);
                 // 1) 记录 URL 到站内导航栈
                 wv.evaluateJavascript("(function(){ return window.location.href; })()", value -> {
                     String url = unquoteJsString(value);
@@ -190,6 +227,32 @@ public class MainActivity extends BridgeActivity {
             return value.substring(1, value.length() - 1);
         }
         return value;
+    }
+
+    /** 原生桥：网页内“退出账号”菜单项点击后调用 */
+    private class JsBridge {
+        @android.webkit.JavascriptInterface
+        public void logout() {
+            runOnUiThread(MainActivity.this::clearSessionAndReload);
+        }
+    }
+
+    /** 彻底清除登录态（cookie + localStorage/sessionStorage + WebStorage），回到登录页 */
+    private void clearSessionAndReload() {
+        try {
+            WebView wv = getBridge() != null ? getBridge().getWebView() : null;
+            if (wv != null) {
+                wv.evaluateJavascript("try{localStorage.clear();sessionStorage.clear();}catch(e){}", null);
+            }
+            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            cm.removeAllCookies(null);
+            cm.flush();
+            android.webkit.WebStorage.getInstance().deleteAllData();
+            if (wv != null) {
+                wv.loadUrl(BASE_URL);
+            }
+        } catch (Exception ignored) {
+        }
     }
 }
 
