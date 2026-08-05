@@ -1,5 +1,6 @@
 package com.hynu.jiaowu;
 
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -23,18 +24,46 @@ public class MainActivity extends BridgeActivity {
     /** 首页连续按两次返回键退出 */
     private static final long BACK_EXIT_INTERVAL = 2000L;
 
+    private static final String PREFS_NAME = "jiaowu_creds";
+    private static final String KEY_ACCT = "acct";
+    private static final String KEY_PWD = "pwd";
+
+    /** 学习脚本：按真实登录框结构（placeholder 特征）抓取账号密码 */
+    private static final String LEARN_JS =
+            "(function(){" +
+            "var acct=document.querySelector('input[placeholder*=\"学号\"],input[placeholder*=\"工号\"],input[autocomplete=\"user\"]');" +
+            "if(!acct)return null;" +
+            "var pwd=document.querySelector('input[placeholder*=\"密码\"],input[type=\"password\"]');" +
+            "if(!pwd)return null;" +
+            "if(!acct.value||!pwd.value)return null;" +
+            "return JSON.stringify({acct:acct.value,pwd:pwd.value});" +
+            "})()";
+
+    /** 填充脚本：登录框存在且密码框为空时填入保存的账号密码 */
+    private static final String FILL_JS =
+            "(function(){" +
+            "var acct=document.querySelector('input[placeholder*=\"学号\"],input[placeholder*=\"工号\"],input[autocomplete=\"user\"]');" +
+            "if(!acct)return;" +
+            "var pwd=document.querySelector('input[placeholder*=\"密码\"],input[type=\"password\"]');" +
+            "if(!pwd||pwd.value)return;" +
+            "var set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;" +
+            "set.call(acct,__ACCT__);acct.dispatchEvent(new Event('input',{bubbles:true}));" +
+            "set.call(pwd,__PWD__);pwd.dispatchEvent(new Event('input',{bubbles:true}));" +
+            "})()";
+
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     /** 站内导航栈（SPA hash 路由不会产生 WebView 历史，需要自己维护） */
     private final List<String> historyStack = new ArrayList<>();
     private long lastBackPressedAt = 0L;
 
-    /** 轮询当前页面 URL（含 hash），维护站内导航栈 */
+    /** 轮询：记录导航栈 + 学习/填充账号密码 */
     private final Runnable urlWatcher = new Runnable() {
         @Override
         public void run() {
             WebView wv = getBridge() != null ? getBridge().getWebView() : null;
             if (wv != null) {
+                // 1) 记录 URL 到站内导航栈
                 wv.evaluateJavascript("(function(){ return window.location.href; })()", value -> {
                     String url = unquoteJsString(value);
                     if (url != null && url.startsWith("https://" + SITE_HOST)) {
@@ -46,6 +75,33 @@ public class MainActivity extends BridgeActivity {
                         }
                     }
                 });
+                // 2) 学习：登录页输入的账号密码自动保存
+                wv.evaluateJavascript(LEARN_JS, value -> {
+                    if (value == null || value.equals("null")) return;
+                    try {
+                        JSONObject o = new JSONObject(value);
+                        String acct = o.optString("acct", "");
+                        String pwd = o.optString("pwd", "");
+                        if (!acct.isEmpty() && !pwd.isEmpty()) {
+                            SharedPreferences sp = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+                            if (!acct.equals(sp.getString(KEY_ACCT, ""))
+                                    || !pwd.equals(sp.getString(KEY_PWD, ""))) {
+                                sp.edit().putString(KEY_ACCT, acct).putString(KEY_PWD, pwd).apply();
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    }
+                });
+                // 3) 填充：已保存且密码框为空时自动填入（用户直接点登录即可）
+                SharedPreferences sp = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+                String acct = sp.getString(KEY_ACCT, "");
+                String pwd = sp.getString(KEY_PWD, "");
+                if (!acct.isEmpty() && !pwd.isEmpty()) {
+                    String js = FILL_JS
+                            .replace("__ACCT__", JSONObject.quote(acct))
+                            .replace("__PWD__", JSONObject.quote(pwd));
+                    wv.evaluateJavascript(js, null);
+                }
             }
             handler.postDelayed(this, 1500);
         }
@@ -61,7 +117,7 @@ public class MainActivity extends BridgeActivity {
                 handleBackPressed();
             }
         });
-        // 轮询页面 URL 维护站内导航栈
+        // 轮询页面 URL / 账号密码学习填充
         handler.postDelayed(urlWatcher, 1000);
     }
 
@@ -134,3 +190,4 @@ public class MainActivity extends BridgeActivity {
         return value;
     }
 }
+

@@ -52,7 +52,9 @@ App 内嵌 WebView 直接加载线上网站，网站更新后 App 自动跟随�
 
 ## App 内置功能（壳层）
 
+- **记住账号密码（自动填充）**：登录页输入账号密码后自动保存；下次打开 App 自动填好登录框，直接点"登录"即可。
+  - 按学校登录页真实结构实现（账号框 `placeholder=请输入学号/工号`、密码框 `type=password`），无 iframe 干扰。
+  - 密码以明文保存在 App 私有存储中（仅本机 App 可读，不联网上传）。
 - **返回键行为**：站内先返回上一级（SPA hash 路由由 App 维护导航栈），回到首页后再按一次返回键才退出应用（2 秒内连按两次）。
-  - 相关代码：`android/app/src/main/java/com/hynu/jiaowu/MainActivity.java`（返回键导航栈）。
-  - 说明：曾尝试"记住账号密码/切换账号"等注入功能，因网站登录机制不兼容已移除，App 保持纯净壳层。
+  - 相关代码：`android/app/src/main/java/com/hynu/jiaowu/MainActivity.java`（账号密码学习/填充、返回键导航栈）。
 
