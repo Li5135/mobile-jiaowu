@@ -297,7 +297,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     /** 读图 → 缩放 → JPEG 压缩 → base64 data URI（避免超大字符串） */
-    private String loadImageAsBase64(android.net.Uri uri) {
+    private String loadImageAsBase64(android.net.Uri uri) throws java.io.FileNotFoundException {
         android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
         opts.inJustDecodeBounds = true;
         java.io.InputStream is0 = getContentResolver().openInputStream(uri);
