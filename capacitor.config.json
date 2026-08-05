@@ -1,0 +1,12 @@
+{
+  "appId": "com.hynu.jiaowu",
+  "appName": "移动教务",
+  "webDir": "web",
+  "server": {
+    "url": "https://hysfjwyd.hynu.edu.cn/dist/#/new/Home",
+    "allowNavigation": ["hysfjwyd.hynu.edu.cn", "hynu.edu.cn"]
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}
