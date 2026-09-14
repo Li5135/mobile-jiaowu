@@ -3,11 +3,22 @@ name: Build Android APK
 on:
   push:
     branches: [main, master]
+  # PR 也构建一次：合并前就能知道改动的代码在真实 Android 工具链下能否编过。
+  # release job 只在 workflow_dispatch 时执行，所以 PR 构建不会产生 Release。
+  pull_request:
+    branches: [main, master]
+  # 手动触发时会额外把 APK 发到 Releases，方便直接把下载链接发给同学
   workflow_dispatch:
+
+# 手动触发时用 GITHUB_TOKEN 创建 Release
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,6 +38,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # 读取 android/app/build.gradle 里的 versionName，统一版本号来源
+      - name: Read version
+        id: ver
+        run: |
+          VERSION=$(grep -oP 'versionName\s+"\K[^"]+' android/app/build.gradle)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本次构建版本：$VERSION"
+
+      # 只有放入了 resources/icon.png（或 assets/logo.png）才会生成图标，
+      # 否则沿用仓库内现有图标，不会因为缺素材而构建失败。
+      - name: Generate app icons (optional)
+        run: |
+          if [ -f resources/icon.png ] || [ -f assets/logo.png ]; then
+            echo "检测到图标源文件，生成各尺寸图标与启动图"
+            npx --yes @capacitor/assets generate --android
+          else
+            echo "未提供 resources/icon.png，跳过图标生成，沿用仓库内现有图标"
+          fi
+
       - name: Sync Capacitor (copy web assets to android)
         run: npx cap sync android
 
@@ -39,6 +69,31 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 移动教务-debug-apk
+          name: 移动教务-${{ steps.ver.outputs.version }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+  # 只在手动触发时发布，避免每次 push 都产生一个 Release
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 移动教务-${{ needs.build.outputs.version }}
+          path: apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          name: 移动教务 v${{ needs.build.outputs.version }}
+          files: apk/app-debug.apk
+          fail_on_unmatched_files: true
+          body: |
+            安装包由 GitHub Actions 自动构建，可直接下载安装（Android 7.0+）。
+
+            - 签名与历史版本一致，可直接覆盖安装，无需卸载。
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,216 +1,174 @@
 package com.hynu.jiaowu;
 
 import android.content.Intent;
-import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
+import android.webkit.WebStorage;
 import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
 
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.WebViewListener;
 
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.lang.ref.WeakReference;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 移动教务壳层。
+ *
+ * <p>页面本身由校内 H5 提供（WebView 直接加载线上地址），这里只补齐原生缺失的能力：
+ * 返回键的站内导航栈、登录凭证的加密记忆与自动填充、课表页自定义背景、
+ * 以及“我的”页面注入的设置入口。
+ *
+ * <p>与线上页面之间通过 {@code window.__jyBridge}（{@link JsBridge}）通信：页面侧
+ * 主动上报路由变化和用户输入的凭证，原生不再周期性轮询页面状态。
+ */
 public class MainActivity extends BridgeActivity {
 
-    /** 页面实际路径 */
+    /** 站点根地址，退出账号后回到这里 */
     private static final String BASE_URL = "https://hysfjwyd.hynu.edu.cn/dist/";
     private static final String SITE_HOST = "hysfjwyd.hynu.edu.cn";
     /** 首页连续按两次返回键退出 */
     private static final long BACK_EXIT_INTERVAL = 2000L;
+    /** 导航栈上限，防止长时间使用无限增长 */
+    private static final int MAX_HISTORY = 60;
 
-    private static final String PREFS_NAME = "jiaowu_creds";
-    private static final String KEY_ACCT = "acct";
-    private static final String KEY_PWD = "pwd";
+    /** 注入脚本与背景图各自存在独立的 prefs 文件：前者非敏感，后者是大体积 base64 */
+    private static final String PREFS_UI = "jiaowu_ui";
     private static final String KEY_BG = "bg";
+
+    private static final String BRIDGE_NAME = "__jyBridge";
     private static final int REQ_PICK_BG = 1001;
 
-    /** 学习脚本：按真实登录框结构（placeholder 特征）抓取账号密码 */
-    private static final String LEARN_JS =
-            "(function(){" +
-            "var acct=document.querySelector('input[placeholder*=\"学号\"],input[placeholder*=\"工号\"],input[autocomplete=\"user\"]');" +
-            "if(!acct)return null;" +
-            "var pwd=document.querySelector('input[placeholder*=\"密码\"],input[type=\"password\"]');" +
-            "if(!pwd)return null;" +
-            "if(!acct.value||!pwd.value)return null;" +
-            "return JSON.stringify({acct:acct.value,pwd:pwd.value});" +
-            "})()";
-
-    /** 填充脚本：登录框存在且密码框为空时填入保存的账号密码 */
-    private static final String FILL_JS =
-            "(function(){" +
-            "var acct=document.querySelector('input[placeholder*=\"学号\"],input[placeholder*=\"工号\"],input[autocomplete=\"user\"]');" +
-            "if(!acct)return;" +
-            "var pwd=document.querySelector('input[placeholder*=\"密码\"],input[type=\"password\"]');" +
-            "if(!pwd||pwd.value)return;" +
-            "var set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;" +
-            "set.call(acct,__ACCT__);acct.dispatchEvent(new Event('input',{bubbles:true}));" +
-            "set.call(pwd,__PWD__);pwd.dispatchEvent(new Event('input',{bubbles:true}));" +
-            "})()";
-
-    /** 注入脚本：在“我的”页面(#/new/person)右上角加设置按钮，点开有“退出账号” */
-    private static final String SETTINGS_JS =
-            "(function(){" +
-            "var h=location.hash||'';" +
-            "var isMine=h.indexOf('person')>=0||h.indexOf('my')>=0||h.indexOf('mine')>=0||h.indexOf('user')>=0;" +
-            "var btn=document.getElementById('app-settings-btn');" +
-            "var menu=document.getElementById('app-settings-menu');" +
-            "if(!isMine){if(btn){btn.parentNode.removeChild(btn);}if(menu){menu.parentNode.removeChild(menu);}return;}" +
-            "if(btn)return;" +
-            "btn=document.createElement('div');" +
-            "btn.id='app-settings-btn';" +
-            "btn.textContent='\u2699';" +
-            "btn.style.cssText='position:fixed;top:12px;right:12px;z-index:99999;width:36px;height:36px;line-height:36px;text-align:center;background:rgba(0,0,0,0.35);color:#fff;font-size:20px;border-radius:50%;';" +
-            "btn.onclick=function(){" +
-            "var m=document.getElementById('app-settings-menu');" +
-            "if(m){m.style.display=(m.style.display==='none')?'block':'none';return;}" +
-            "var menu=document.createElement('div');" +
-            "menu.id='app-settings-menu';" +
-            "menu.style.cssText='position:fixed;top:54px;right:12px;z-index:99999;background:#fff;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.2);padding:6px 0;min-width:130px;';" +
-            "var it2=document.createElement('div');" +
-            "it2.textContent='\u66f4\u6362\u8bfe\u8868\u4e3b\u9898';" +
-            "it2.style.cssText='padding:12px 16px;font-size:14px;color:#333;cursor:pointer;text-align:center;';" +
-            "it2.onclick=function(){if(window.AndroidBridge){window.AndroidBridge.chooseBackground();}};" +
-            "menu.appendChild(it2);" +
-            "var it=document.createElement('div');" +
-            "it.textContent='\u9000\u51fa\u8d26\u53f7';" +
-            "it.style.cssText='padding:12px 16px;font-size:14px;color:#d33;cursor:pointer;text-align:center;';" +
-            "it.onclick=function(){if(window.AndroidBridge){window.AndroidBridge.logout();}};" +
-            "menu.appendChild(it);" +
-            "document.body.appendChild(menu);" +
-            "};" +
-            "document.body.appendChild(btn);" +
-            "})()";
-
-    /** 背景注入脚本：课表页面应用自定义背景图片（__BG__ 占位，data URI） */
-    private static final String BG_JS =
-            "(function(){" +
-            "var h=location.hash||'';" +
-            "var isTable=h.indexOf('schedule')>=0||h.indexOf('kebiao')>=0||h.indexOf('timetable')>=0||h.indexOf('course')>=0;" +
-            "var s=document.getElementById('app-bg-style');" +
-            "if(!isTable){if(s){s.parentNode.removeChild(s);}return;}" +
-            "if(s)return;" +
-            "s=document.createElement('style');" +
-            "s.id='app-bg-style';" +
-            "s.textContent='html,body{background-image:url(__BG__)!important;background-size:cover!important;background-position:center!important;background-attachment:fixed!important;}';" +
-            "document.head.appendChild(s);" +
-            "})()";
-
+    /** 站内 SPA 导航栈（hash 路由不产生 WebView 历史，需要自己维护） */
+    private final List<String> historyStack = new ArrayList<>();
     private final Handler handler = new Handler(Looper.getMainLooper());
 
-    /** 站内导航栈（SPA hash 路由不会产生 WebView 历史，需要自己维护） */
-    private final List<String> historyStack = new ArrayList<>();
+    private WebView webView;
     private long lastBackPressedAt = 0L;
-    private boolean jsBridgeAttached = false;
 
-    /** 轮询：记录导航栈 + 学习/填充账号密码 */
-    private final Runnable urlWatcher = new Runnable() {
-        @Override
-        public void run() {
-            WebView wv = getBridge() != null ? getBridge().getWebView() : null;
-            if (wv != null) {
-                // 0) 首次附加原生桥（供网页内“退出账号”调用）
-                if (!jsBridgeAttached) {
-                    wv.addJavascriptInterface(new JsBridge(), "AndroidBridge");
-                    jsBridgeAttached = true;
-                }
-                // 0.5) 在“我的”页面注入设置按钮/退出账号
-                wv.evaluateJavascript(SETTINGS_JS, null);
-                // 0.6) 课表页应用自定义背景
-                String bg = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_BG, "");
-                if (!bg.isEmpty()) {
-                    wv.evaluateJavascript(BG_JS.replace("__BG__", bg), null);
-                }
-                // 1) 记录 URL 到站内导航栈
-                wv.evaluateJavascript("(function(){ return window.location.href; })()", value -> {
-                    String url = unquoteJsString(value);
-                    if (url != null && url.startsWith("https://" + SITE_HOST)) {
-                        if (historyStack.isEmpty() || !historyStack.get(historyStack.size() - 1).equals(url)) {
-                            historyStack.add(url);
-                            if (historyStack.size() > 60) {
-                                historyStack.remove(0);
-                            }
-                        }
-                    }
-                });
-                // 2) 学习：登录页输入的账号密码自动保存
-                wv.evaluateJavascript(LEARN_JS, value -> {
-                    if (value == null || value.equals("null")) return;
-                    try {
-                        // evaluateJavascript 返回值是 JSON 编码字符串，先解一层外层引号
-                        String inner = new JSONObject("{\"v\":" + value + "}").getString("v");
-                        JSONObject o = new JSONObject(inner);
-                        String acct = o.optString("acct", "");
-                        String pwd = o.optString("pwd", "");
-                        if (!acct.isEmpty() && !pwd.isEmpty()) {
-                            SharedPreferences sp = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-                            if (!acct.equals(sp.getString(KEY_ACCT, ""))
-                                    || !pwd.equals(sp.getString(KEY_PWD, ""))) {
-                                sp.edit().putString(KEY_ACCT, acct).putString(KEY_PWD, pwd).apply();
-                            }
-                        }
-                    } catch (Exception ignored) {
-                    }
-                });
-                // 3) 填充：已保存且密码框为空时自动填入（用户直接点登录即可）
-                SharedPreferences sp = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-                String acct = sp.getString(KEY_ACCT, "");
-                String pwd = sp.getString(KEY_PWD, "");
-                if (!acct.isEmpty() && !pwd.isEmpty()) {
-                    String js = FILL_JS
-                            .replace("__ACCT__", JSONObject.quote(acct))
-                            .replace("__PWD__", JSONObject.quote(pwd));
-                    wv.evaluateJavascript(js, null);
-                }
-            }
-            handler.postDelayed(this, 1500);
-        }
-    };
+    /** 注入脚本模板，仅读取一次 */
+    private String injectTemplate;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 返回键：站内先回退，首页再按一次退出
+
+        // 返回键：站内先回退，首页再按两次退出
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
                 handleBackPressed();
             }
         });
-        // 轮询页面 URL / 账号密码学习填充
-        handler.postDelayed(urlWatcher, 1000);
+
+        if (getBridge() != null) {
+            webView = getBridge().getWebView();
+            // 原生桥的注册时机必须早于页面脚本执行，否则页面拿不到 window.__jyBridge
+            webView.addJavascriptInterface(new JsBridge(this), BRIDGE_NAME);
+            getBridge().addWebViewListener(new PageLoadListener(this));
+        }
     }
 
-    @Override
-    public void onDestroy() {
-        handler.removeCallbacks(urlWatcher);
-        super.onDestroy();
+    /* ------------------------------------------------------------------ 页面事件 */
+
+    /**
+     * 整页加载完成：重置站内导航栈、记录新页面，并注入壳层脚本。
+     *
+     * <p>栈只在整页加载时重置——此时真正的返回行为已经由 WebView 自身的历史承担，
+     * 站内栈只需记录「当前这个页面内的 hash 路由」。
+     *
+     * <p>这里必须自己把 URL 入栈，不能依赖注入脚本回报：脚本是幂等的，
+     * 后续整页加载时 {@code __jyReady} 已存在会直接返回，不会再触发上报。
+     */
+    void onPageLoaded(WebView view, String url) {
+        if (url == null || !url.startsWith("https://" + SITE_HOST)) return;
+        historyStack.clear();
+        recordUrl(url);
+        injectShellScript(view);
     }
+
+    /** 页面通过 hashchange 上报路由变化 */
+    private void onRouteReported(String url) {
+        recordUrl(url);
+    }
+
+    /** 入栈，做去重与上限裁剪 */
+    private void recordUrl(String url) {
+        if (url == null || !url.startsWith("https://" + SITE_HOST)) return;
+        if (!historyStack.isEmpty() && historyStack.get(historyStack.size() - 1).equals(url)) return;
+        historyStack.add(url);
+        while (historyStack.size() > MAX_HISTORY) {
+            historyStack.remove(0);
+        }
+    }
+
+    /**
+     * 注入壳层脚本。凭证以「上次记录值」的形式下发：页面据此避免重复上报，
+     * 同时原生侧只在用户真的改动了输入框时才写存储。
+     */
+    private void injectShellScript(WebView view) {
+        if (injectTemplate == null) {
+            injectTemplate = readAsset("inject.js");
+            if (injectTemplate == null) return;
+        }
+        String[] creds = CredentialVault.load(this);
+        String acct = creds != null ? creds[0] : "";
+        String pwd = creds != null ? creds[1] : "";
+
+        String script = injectTemplate
+            .replace("__ACCT__", JSONObject.quote(acct))
+            .replace("__PWD__", JSONObject.quote(pwd))
+            .replace("__BG_VALUE__", JSONObject.quote(background()));
+        view.evaluateJavascript(script, null);
+    }
+
+    private String readAsset(String name) {
+        try (InputStream is = getAssets().open(name);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /* ------------------------------------------------------------------ 返回键 */
 
     /** 返回键逻辑：WebView 整页历史 > 站内 SPA 历史 > 首页双击退出 */
     private void handleBackPressed() {
-        WebView wv = getBridge() != null ? getBridge().getWebView() : null;
-        if (wv == null) {
+        if (webView == null) {
             finish();
             return;
         }
         // 1) 整页导航历史（跨页跳转、外链等）
-        if (wv.canGoBack()) {
-            wv.goBack();
+        if (webView.canGoBack()) {
+            webView.goBack();
             return;
         }
         // 2) 站内 SPA 历史（hash 路由）
         if (historyStack.size() >= 2) {
-            String currentUrl = historyStack.get(historyStack.size() - 1);
+            String current = historyStack.get(historyStack.size() - 1);
             String prev = historyStack.get(historyStack.size() - 2);
             historyStack.remove(historyStack.size() - 1);
-            navigateTo(prev, currentUrl);
+            navigateTo(prev, current);
             return;
         }
         // 3) 已在首页：2 秒内连按两次退出
@@ -225,14 +183,13 @@ public class MainActivity extends BridgeActivity {
 
     /** 站内回退：同路径只改 hash（不整页刷新，保留页面状态），不同路径整页加载 */
     private void navigateTo(String targetUrl, String currentUrl) {
-        WebView wv = getBridge() != null ? getBridge().getWebView() : null;
-        if (wv == null) return;
+        if (webView == null) return;
         if (currentUrl != null && samePath(currentUrl, targetUrl)) {
             int idx = targetUrl.indexOf('#');
             String hash = idx >= 0 ? targetUrl.substring(idx) : "";
-            wv.evaluateJavascript("location.hash=" + JSONObject.quote(hash), null);
+            webView.evaluateJavascript("location.hash=" + JSONObject.quote(hash), null);
         } else {
-            wv.loadUrl(targetUrl);
+            webView.loadUrl(targetUrl);
         }
     }
 
@@ -241,76 +198,98 @@ public class MainActivity extends BridgeActivity {
             java.net.URI ua = new java.net.URI(a);
             java.net.URI ub = new java.net.URI(b);
             return ua.getHost() != null && ua.getHost().equals(ub.getHost())
-                    && ua.getPath() != null && ua.getPath().equals(ub.getPath());
+                && ua.getPath() != null && ua.getPath().equals(ub.getPath());
         } catch (Exception e) {
             return false;
         }
     }
 
-    /** evaluateJavascript 返回的字符串是带引号的 JSON 字符串，去掉引号 */
-    private String unquoteJsString(String value) {
-        if (value == null || value.equals("null")) return null;
-        if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
-            return value.substring(1, value.length() - 1);
+    /* ------------------------------------------------------------------ 凭证与背景 */
+
+    /** 保存页面上报的凭证；Keystore 不可用时明确告知用户，不静默失败 */
+    private void saveCredentials(String acct, String pwd) {
+        if (acct == null || acct.isEmpty() || pwd == null || pwd.isEmpty()) return;
+        if (!CredentialVault.save(this, acct, pwd)) {
+            runOnUiThread(() ->
+                Toast.makeText(this, "账号密码无法安全保存，本次不会记住登录信息", Toast.LENGTH_SHORT).show());
         }
-        return value;
     }
 
-    /** 原生桥：网页内“退出账号”/“更换课表主题”菜单项点击后调用 */
-    private class JsBridge {
-        @android.webkit.JavascriptInterface
-        public void logout() {
-            runOnUiThread(MainActivity.this::clearSessionAndReload);
+    private String background() {
+        try {
+            return getSharedPreferences(PREFS_UI, MODE_PRIVATE).getString(KEY_BG, "");
+        } catch (Exception e) {
+            return "";
         }
+    }
 
-        @android.webkit.JavascriptInterface
-        public void chooseBackground() {
-            runOnUiThread(() -> {
-                try {
-                    Intent i = new Intent(Intent.ACTION_GET_CONTENT);
-                    i.setType("image/*");
-                    startActivityForResult(i, REQ_PICK_BG);
-                } catch (Exception ignored) {
-                }
+    private void saveBackground(String dataUri) {
+        getSharedPreferences(PREFS_UI, MODE_PRIVATE).edit().putString(KEY_BG, dataUri).apply();
+        // 重新加载以应用新背景，同时让注入脚本拿到最新的 __BG_VALUE__
+        if (webView != null) webView.loadUrl(BASE_URL);
+    }
+
+    /** 彻底清除登录态（凭证 + cookie + localStorage/sessionStorage + WebStorage）并回到登录页 */
+    private void clearSessionAndReload() {
+        CredentialVault.clear(this);
+        final WebView wv = webView;
+        if (wv == null) return;
+        // 先清完页面存储再重新加载，避免和 WebView 的异步清理竞争
+        wv.evaluateJavascript(
+            "try{localStorage.clear();sessionStorage.clear();}catch(e){}",
+            value -> {
+                CookieManager.getInstance().removeAllCookies(null);
+                CookieManager.getInstance().flush();
+                WebStorage.getInstance().deleteAllData();
+                wv.loadUrl(BASE_URL);
             });
-        }
     }
+
+    /* ------------------------------------------------------------------ 选图 */
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_PICK_BG && resultCode == RESULT_OK && data != null && data.getData() != null) {
-            final android.net.Uri uri = data.getData();
-            new Thread(() -> {
-                try {
-                    final String b64 = loadImageAsBase64(uri);
-                    runOnUiThread(() -> {
-                        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                                .edit().putString(KEY_BG, b64).apply();
-                        Toast.makeText(this, "课表主题已设置，进入课表页查看", Toast.LENGTH_LONG).show();
-                    });
-                } catch (Exception e) {
-                    runOnUiThread(() -> Toast.makeText(this, "图片处理失败，请换一张", Toast.LENGTH_SHORT).show());
-                }
-            }).start();
+        if (requestCode != REQ_PICK_BG || resultCode != RESULT_OK || data == null || data.getData() == null) {
+            return;
         }
+        final Uri uri = data.getData();
+        new Thread(() -> {
+            try {
+                final String dataUri = loadImageAsBase64(uri);
+                runOnUiThread(() -> {
+                    saveBackground(dataUri);
+                    Toast.makeText(this, "课表主题已设置，进入课表页查看", Toast.LENGTH_LONG).show();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(this, "图片处理失败，请换一张", Toast.LENGTH_SHORT).show());
+            }
+        }).start();
     }
 
-    /** 读图 → 缩放 → JPEG 压缩 → base64 data URI（避免超大字符串） */
-    private String loadImageAsBase64(android.net.Uri uri) throws java.io.FileNotFoundException {
+    /**
+     * 读图 → 降采样 → 缩放 → JPEG 压缩 → base64 data URI（避免超大字符串）。
+     *
+     * <p>需要声明 {@code IOException}：try-with-resources 在关闭输入流时可能抛出该异常，
+     * 调用方在后台线程里统一兜住。
+     */
+    private String loadImageAsBase64(Uri uri) throws java.io.IOException {
         android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
         opts.inJustDecodeBounds = true;
-        java.io.InputStream is0 = getContentResolver().openInputStream(uri);
-        android.graphics.BitmapFactory.decodeStream(is0, null, opts);
-        if (is0 != null) { try { is0.close(); } catch (Exception ignored) {} }
+        try (InputStream probe = getContentResolver().openInputStream(uri)) {
+            android.graphics.BitmapFactory.decodeStream(probe, null, opts);
+        } catch (Exception ignored) {
+        }
         int sample = 1;
         while (opts.outWidth / (sample * 2) >= 720) sample *= 2;
         opts.inJustDecodeBounds = false;
         opts.inSampleSize = sample;
-        java.io.InputStream is = getContentResolver().openInputStream(uri);
-        android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeStream(is, null, opts);
-        if (is != null) { try { is.close(); } catch (Exception ignored) {} }
-        if (bmp == null) throw new RuntimeException("decode fail");
+
+        android.graphics.Bitmap bmp;
+        try (InputStream is = getContentResolver().openInputStream(uri)) {
+            bmp = android.graphics.BitmapFactory.decodeStream(is, null, opts);
+        }
+        if (bmp == null) throw new IllegalStateException("decode failed");
         int w = bmp.getWidth();
         if (w > 720) {
             int h = (int) (bmp.getHeight() * 720.0 / w);
@@ -319,25 +298,72 @@ public class MainActivity extends BridgeActivity {
         java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
         bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, bos);
         return "data:image/jpeg;base64," + android.util.Base64.encodeToString(
-                bos.toByteArray(), android.util.Base64.NO_WRAP);
+            bos.toByteArray(), android.util.Base64.NO_WRAP);
     }
 
-    /** 彻底清除登录态（cookie + localStorage/sessionStorage + WebStorage），回到登录页 */
-    private void clearSessionAndReload() {
-        try {
-            WebView wv = getBridge() != null ? getBridge().getWebView() : null;
-            if (wv != null) {
-                wv.evaluateJavascript("try{localStorage.clear();sessionStorage.clear();}catch(e){}", null);
-            }
-            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
-            cm.removeAllCookies(null);
-            cm.flush();
-            android.webkit.WebStorage.getInstance().deleteAllData();
-            if (wv != null) {
-                wv.loadUrl(BASE_URL);
-            }
-        } catch (Exception ignored) {
+    /* ------------------------------------------------------------------ 组件 */
+
+    /**
+     * 页面加载回调。用 Capacitor 提供的监听器而不是替换 {@code WebViewClient}，
+     * 这样 Capacitor 自身的 URL 拦截、错误页、插件回调都保持原样。
+     */
+    private static final class PageLoadListener extends WebViewListener {
+        private final WeakReference<MainActivity> activityRef;
+
+        PageLoadListener(MainActivity activity) {
+            this.activityRef = new WeakReference<>(activity);
+        }
+
+        @Override
+        public void onPageLoaded(WebView webView) {
+            MainActivity activity = activityRef.get();
+            if (activity != null) activity.onPageLoaded(webView, webView.getUrl());
+        }
+    }
+
+    /** 原生桥：页面侧的 route / storeCreds / logout / chooseBackground 都落到这里 */
+    private static final class JsBridge {
+        private final WeakReference<MainActivity> activityRef;
+
+        JsBridge(MainActivity activity) {
+            this.activityRef = new WeakReference<>(activity);
+        }
+
+        /** 页面路由变化上报。注意：JS 接口在 WebView 的 JS 线程回调，必须切回主线程。
+         *  脚本会多传一个 fullLoad 参数，这里按需忽略。 */
+        @JavascriptInterface
+        public void route(String url) {
+            MainActivity activity = activityRef.get();
+            if (activity == null) return;
+            activity.handler.post(() -> activity.onRouteReported(url));
+        }
+
+        @JavascriptInterface
+        public void storeCreds(String acct, String pwd) {
+            MainActivity activity = activityRef.get();
+            if (activity == null) return;
+            activity.handler.post(() -> activity.saveCredentials(acct, pwd));
+        }
+
+        @JavascriptInterface
+        public void logout() {
+            MainActivity activity = activityRef.get();
+            if (activity == null) return;
+            activity.runOnUiThread(activity::clearSessionAndReload);
+        }
+
+        @JavascriptInterface
+        public void chooseBackground() {
+            MainActivity activity = activityRef.get();
+            if (activity == null) return;
+            activity.runOnUiThread(() -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                    i.setType("image/*");
+                    activity.startActivityForResult(i, REQ_PICK_BG);
+                } catch (Exception ignored) {
+                }
+            });
         }
     }
 }
-

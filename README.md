@@ -59,11 +59,44 @@ App 内嵌 WebView 直接加载线上网站，网站更新后 App 自动跟随�
 
 - **记住账号密码（自动填充）**：登录页输入账号密码后自动保存；下次打开 App 自动填好登录框，直接点"登录"即可。
   - 按学校登录页真实结构实现（账号框 `placeholder=请输入学号/工号`、密码框 `type=password`），无 iframe 干扰。
-  - 密码以明文保存在 App 私有存储中（仅本机 App 可读，不联网上传）。
+  - **加密存储**：密码用 Android Keystore 里的 AES/GCM 密钥加密后保存，密钥不出系统安全区，落盘内容离开本机无法还原（见 `CredentialVault.java`）。应用已关闭云备份与换机迁移，凭证不会被带出设备。
+  - 只在本机使用，不联网上传。
 - **设置按钮（"我的"页面右上角）**：进入"我的"页面，右上角有 ⚙ 按钮 → 点开菜单：
   - **更换课表主题**：从手机相册选一张图片作为课表页面背景（图片压缩后保存在 App 内，进入课表页自动应用）；
   - **退出账号**：清除登录数据回到登录页（重新登录即切换账号）。
   - 按钮由 App 注入到页面（JS 注入 + 原生桥），仅出现在"我的"页面。
 - **返回键行为**：站内先返回上一级（SPA hash 路由由 App 维护导航栈），回到首页后再按一次返回键才退出应用（2 秒内连按两次）。
-  - 相关代码：`android/app/src/main/java/com/hynu/jiaowu/MainActivity.java`（账号密码学习/填充、返回键导航栈）。
+
+### 壳层实现方式
+
+页面侧脚本 `android/app/src/main/assets/inject.js` 在整页加载完成后注入，通过 `window.__jyBridge`
+主动与原生通信（上报路由变化、上报用户输入的凭证），原生侧用 Capacitor 的
+`addWebViewListener` 接收页面加载事件。
+
+早期版本用 1.5 秒定时轮询页面状态，现已移除：轮询会持续唤醒 WebView 执行 JS，既费电又会
+让返回键在最长 1.5 秒内拿到过期的路由。现在是纯事件驱动，空闲时零开销。
+
+主要文件：
+
+| 文件 | 职责 |
+|---|---|
+| `MainActivity.java` | 返回键导航栈、壳层脚本注入、选图、退出登录 |
+| `CredentialVault.java` | 账号密码的 Keystore 加密读写 |
+| `assets/inject.js` | 注入到线上页面的脚本（按钮、背景、填充、路由上报） |
+
+## 自定义图标
+
+把 `icon.png`（1024×1024）放进 `resources/` 目录，之后每次构建会自动生成全套
+Android 图标与启动图；不放则沿用仓库内现有图标。详见 `resources/README.md`。
+
+## 发布安装包
+
+仓库页面 → **Actions** → `Build Android APK` → **Run workflow**，跑完会同时：
+
+1. 上传构建产物（Artifacts）；
+2. 按 `versionName` 创建 GitHub Release，可直接把 Release 里的 `app-debug.apk` 下载链接发给别人。
+
+直接 push 到 main 只构建、不发 Release，避免产生大量无用版本。
+版本号以 `android/app/build.gradle` 的 `versionName` 为准（CI 自动读取）。
+
 

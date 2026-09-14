@@ -1,7 +1,7 @@
 {
   "name": "mobile-app",
-  "version": "1.0.0",
-  "description": "",
+  "version": "1.2.0",
+  "description": "衡阳师范学院移动教务 Android 壳层（Capacitor WebView）",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
