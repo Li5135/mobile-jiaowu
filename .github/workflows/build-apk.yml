@@ -3,6 +3,10 @@ name: Build Android APK
 on:
   push:
     branches: [main, master]
+  # PR 也构建一次：合并前就能知道改动的代码在真实 Android 工具链下能否编过。
+  # release job 只在 workflow_dispatch 时执行，所以 PR 构建不会产生 Release。
+  pull_request:
+    branches: [main, master]
   # 手动触发时会额外把 APK 发到 Releases，方便直接把下载链接发给同学
   workflow_dispatch:
 
