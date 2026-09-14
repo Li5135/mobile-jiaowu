@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+        allowBackup=false：应用私有目录里保存着登录凭证的密文和课表主题，
+        且签名固定（可覆盖安装）。云备份 / 换机迁移会把这些数据带出设备，
+        而 Keystore 密钥不可迁移，还原后既解不开密文又白白扩大暴露面，因此直接关闭备份。
+    -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
